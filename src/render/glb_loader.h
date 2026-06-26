@@ -3,9 +3,20 @@
 #include <string>
 #include <vector>
 
+enum MaterialFlag : uint32_t {
+    MatFlag_None = 0,
+    MatFlag_Translucent = 1,
+    MatFlag_Additive = 2,
+    MatFlag_SelfIlluminating = 4,
+    MatFlag_NeverEnvMap = 8,
+    MatFlag_SWrap = 16,
+    MatFlag_TWrap = 32,
+};
+
 struct MaterialInfo {
     std::string resourcePath; // e.g. "skins/base.lbioderm" or "lush/BE_EWAL01B"
     int embeddedTextureIndex = -1; // index into GLB textures array, -1 if none
+    uint32_t flags = 0;
 };
 
 struct GLBMesh {

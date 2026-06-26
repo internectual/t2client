@@ -93,6 +93,7 @@ struct DTSShape {
     };
     std::vector<Animation> animations;
     std::vector<Texture> materialTextures;
+    std::vector<uint32_t> materialFlags; // parallel to materialTextures
     bool loaded = false;
     bool load(const uint8_t* data, size_t size);
     bool loadGLB(const uint8_t* data, size_t size);

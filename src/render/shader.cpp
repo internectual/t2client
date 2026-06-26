@@ -38,16 +38,21 @@ in vec4 vColor;
 
 uniform sampler2D uTexture;
 uniform bool uUseTexture;
+uniform bool uSelfIlluminated = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
 
 out vec4 FragColor;
 
 void main() {
-    vec3 N = normalize(vNormal);
-    float diff = max(dot(N, normalize(uLightDir)), 0.0);
     vec4 texColor = uUseTexture ? texture(uTexture, vUV) : vec4(1.0);
     vec4 col = vColor * texColor;
-    FragColor = vec4(col.rgb * (0.3 + 0.7 * diff), col.a);
+    if (uSelfIlluminated) {
+        FragColor = vec4(col.rgb, col.a);
+    } else {
+        vec3 N = normalize(vNormal);
+        float diff = max(dot(N, normalize(uLightDir)), 0.0);
+        FragColor = vec4(col.rgb * (0.3 + 0.7 * diff), col.a);
+    }
 }
 )";
 

@@ -357,13 +357,23 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
     meshes = std::move(glb.meshes);
     materialTextures = std::move(glb.textures);
 
+    // ── Build material flags parallel to materialTextures ──
+    // Each entry in materialTextures corresponds to a slot; map from GLB material index.
+    std::vector<int> matToTex(glb.materials.size(), -1);
+    materialFlags.clear();
+
+    // For embedded textures, map material → existing texture index
+    for (size_t i = 0; i < glb.materials.size(); i++) {
+        if (i < materialTextures.size() && materialTextures[i].loaded) {
+            matToTex[i] = (int)i;
+        }
+    }
+
     // Resolve textures from filesystem for materials with resource_path
     // but no embedded texture loaded (common for shapes)
-    std::vector<int> matToTex(glb.materials.size(), -1);
     bool needsResolution = false;
     for (size_t i = 0; i < glb.materials.size(); i++) {
-        if (!glb.materials[i].resourcePath.empty() &&
-            (i >= materialTextures.size() || !materialTextures[i].loaded)) {
+        if (!glb.materials[i].resourcePath.empty() && matToTex[i] < 0) {
             needsResolution = true;
             break;
         }
@@ -375,10 +385,9 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
 
         for (size_t i = 0; i < glb.materials.size(); i++) {
             auto& mat = glb.materials[i];
-            if (mat.resourcePath.empty()) continue;
+            if (mat.resourcePath.empty() || matToTex[i] >= 0) continue;
 
             std::string texPath = "textures/" + mat.resourcePath;
-            // Normalize to lowercase for filesystem lookup (VL2 archives are lowercase)
             for (auto& c : texPath) c = std::tolower(c);
             std::vector<uint8_t> texData;
             const char* matchedExt = nullptr;
@@ -393,7 +402,6 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
 
             if (!texData.empty()) {
                 Texture tex;
-                // .bm8 uses a custom paletted format; others use stb_image
                 if (matchedExt && std::strcmp(matchedExt, ".bm8") == 0)
                     tex.loadBM8(texData.data(), texData.size());
                 else
@@ -401,19 +409,25 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
                 if (tex.loaded) {
                     matToTex[i] = (int)materialTextures.size();
                     materialTextures.push_back(std::move(tex));
-                    Console::instance().printf(LogLevel::Debug, "  loaded texture: %s", texPath.c_str());
                 }
-            } else {
-                Console::instance().printf(LogLevel::Debug, "  texture not found: %s", texPath.c_str());
             }
         }
+    }
 
-        // Update mesh materialIndex to point into our new materialTextures
-        for (auto& mesh : meshes) {
-            if (mesh.materialIdx >= 0 && mesh.materialIdx < (int)matToTex.size()) {
-                int newIdx = matToTex[mesh.materialIdx];
-                if (newIdx >= 0) mesh.materialIndex = newIdx;
-            }
+    // Finalize material flags — one per slot in materialTextures
+    materialFlags.resize(materialTextures.size(), 0);
+    for (size_t i = 0; i < glb.materials.size(); i++) {
+        int ti = matToTex[i];
+        if (ti >= 0 && ti < (int)materialFlags.size()) {
+            materialFlags[ti] = glb.materials[i].flags;
+        }
+    }
+
+    // Update mesh materialIndex
+    for (auto& mesh : meshes) {
+        if (mesh.materialIdx >= 0 && mesh.materialIdx < (int)matToTex.size()) {
+            int newIdx = matToTex[mesh.materialIdx];
+            if (newIdx >= 0) mesh.materialIndex = newIdx;
         }
     }
 
@@ -432,6 +446,7 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
 void DTSShape::render(int32_t detailLevel) {
     auto* shader = ShaderManager::getDefaultShader();
     for (auto& mesh : meshes) {
+        uint32_t flags = 0;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
             auto& tex = materialTextures[mesh.materialIndex];
             if (tex.loaded) {
@@ -440,9 +455,28 @@ void DTSShape::render(int32_t detailLevel) {
             } else {
                 if (shader) shader->setUniform("uUseTexture", (int32_t)0);
             }
+            if (mesh.materialIndex < (int)materialFlags.size())
+                flags = materialFlags[mesh.materialIndex];
         } else {
             if (shader) shader->setUniform("uUseTexture", (int32_t)0);
         }
+
+        // Set blend mode based on material flags
+        if (flags & MatFlag_Additive) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glDepthMask(GL_FALSE);
+        } else if (flags & MatFlag_Translucent) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        } else {
+            glDisable(GL_BLEND);
+            glDepthMask(GL_TRUE);
+        }
+
+        if (shader) shader->setUniform("uSelfIlluminated", (int32_t)((flags & MatFlag_SelfIlluminating) ? 1 : 0));
+
         mesh.render();
     }
 }

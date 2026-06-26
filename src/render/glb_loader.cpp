@@ -314,14 +314,34 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
         }
         matInfos.push_back(mi);
 
-        // Extract resource_path from extras
+        // Extract resource_path and flags from extras
         MaterialInfo& matInfo = result.materials[i];
         if (matArr[i]["extras"].t != JType::Null) {
             const JVal& ext = matArr[i]["extras"];
             if (ext["resource_path"].t != JType::Null) {
                 matInfo.resourcePath = ext["resource_path"].asStr();
-                // Normalize backslashes to forward slashes
                 for (auto& c : matInfo.resourcePath) if (c == '\\') c = '/';
+            }
+            // Parse flag_names
+            const JVal& fns = ext["flag_names"];
+            if (fns.t != JType::Null) {
+                for (size_t fi = 0; fi < fns.size(); fi++) {
+                    std::string fn = fns[fi].asStr();
+                    if (fn == "Translucent")          matInfo.flags |= MatFlag_Translucent;
+                    else if (fn == "Additive")        matInfo.flags |= MatFlag_Additive;
+                    else if (fn == "SelfIlluminating") matInfo.flags |= MatFlag_SelfIlluminating;
+                    else if (fn == "NeverEnvMap")     matInfo.flags |= MatFlag_NeverEnvMap;
+                    else if (fn == "SWrap")           matInfo.flags |= MatFlag_SWrap;
+                    else if (fn == "TWrap")           matInfo.flags |= MatFlag_TWrap;
+                }
+            }
+            // Also try surface_flag_names (used by interior materials)
+            const JVal& sfn = ext["surface_flag_names"];
+            if (sfn.t != JType::Null) {
+                for (size_t fi = 0; fi < sfn.size(); fi++) {
+                    std::string fn = sfn[fi].asStr();
+                    if (fn == "SurfaceOutsideVisible") {} // not needed for rendering
+                }
             }
         }
     }
