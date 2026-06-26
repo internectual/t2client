@@ -1,0 +1,208 @@
+#include "core/engine.h"
+#include "fs/vol_archive.h"
+#include "fs/vl2_archive.h"
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+struct Engine::Impl {};
+
+Engine::Engine() : impl(new Impl) {}
+Engine::~Engine() { delete impl; }
+
+Engine& Engine::instance() {
+    static Engine eng;
+    return eng;
+}
+
+bool Engine::init(int argc, char* argv[]) {
+    Console::instance().printf(LogLevel::Info, "T2 Client v0.1.0");
+
+    // Parse args
+    std::string dataDir = ".";
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-data") == 0 && i + 1 < argc) dataDir = argv[i + 1];
+        if (strcmp(argv[i], "-online") == 0) Console::instance().setVariable("online", "1");
+    }
+
+    // Init subsystems
+    tim = new Timer;
+    con = &Console::instance();
+    plat = new Platform;
+    filesys = new FileSystem;
+    ren = new Renderer;
+    aud = new AudioSystem;
+    scr = new ScriptEngine;
+    net = new NetworkManager;
+    g = new Game;
+
+    // Platform
+    PlatformConfig pconfig;
+    pconfig.title = "Tribes 2 Open Client";
+    pconfig.width = Console::instance().getIntVariable("videoWidth", 1280);
+    pconfig.height = Console::instance().getIntVariable("videoHeight", 720);
+    if (!plat->init(pconfig)) return false;
+
+    // File System - add T2 data paths
+    std::vector<std::string> paths = {dataDir, dataDir + "/base", "./base", "./data"};
+    filesys->init(paths);
+
+    // Load VOL archives
+    auto& fs = *filesys;
+    auto addArchive = [&](const char* name) {
+        auto* vol = new VolArchive;
+        if (vol->open(name)) fs.addArchive(vol); else delete vol;
+    };
+
+    // Add all game archives if they exist
+    std::vector<std::string> archives;
+    fs.listFiles("*.vl2", archives);
+    for (auto& a : archives) {
+        auto* vl2 = new Vl2Archive;
+        if (vl2->open(a.c_str())) fs.addArchive(vl2); else delete vl2;
+    }
+    fs.listFiles("*.vol", archives);
+    for (auto& a : archives) {
+        auto* vol = new VolArchive;
+        if (vol->open(a.c_str())) fs.addArchive(vol); else delete vol;
+    }
+
+    // Renderer
+    if (!ren->init(plat->nativeWindow())) return false;
+    ren->config().width = plat->width();
+    ren->config().height = plat->height();
+    plat->setResizeCallback([this](int w, int h) { ren->onResize(w, h); });
+
+    // Audio
+    aud->init();
+
+    // Script engine
+    scr->init();
+
+    // Network
+    net->init();
+
+    // Game
+    g->init();
+
+    // Register console commands
+    con->addCommand("quit", [this](int32_t argc, const char* const* argv) {
+        quit();
+    });
+
+    con->addCommand("echo", [](int32_t argc, const char* const* argv) {
+        std::string msg;
+        for (int i = 1; i < argc; i++) {
+            if (i > 1) msg += " ";
+            msg += argv[i];
+        }
+        Console::instance().printf(LogLevel::Info, "%s", msg.c_str());
+    });
+
+    con->addCommand("exec", [](int32_t argc, const char* const* argv) {
+        if (argc > 1) Console::instance().executeFile(argv[1]);
+    });
+
+    Console::instance().printf(LogLevel::Info, "Engine initialized successfully");
+    return true;
+}
+
+void Engine::run() {
+    running = true;
+
+    double lastTime = Timer::now();
+    double fpsTimer = 0;
+    int frameCount = 0;
+
+    while (running && plat->isRunning()) {
+        double now = Timer::now();
+        float dt = (float)(now - lastTime);
+        lastTime = now;
+
+        // Cap dt
+        if (dt > 0.1f) dt = 0.1f;
+
+        // Process events
+        if (!plat->processEvents()) break;
+
+        // Update subsystems
+        net->update();
+        scr->vm()->setVariable("time", (float)now);
+
+        // Game update
+        if (g->state() != Game::Menu) {
+            // Read input
+            Game::InputMove input;
+            auto& keys = plat->input().keysDown;
+            input.forward = keys[26] != 0;   // W
+            input.backward = keys[22] != 0;  // S
+            input.left = keys[4] != 0;       // A
+            input.right = keys[7] != 0;       // D
+            input.jump = keys[44] != 0;       // Space
+            input.jet = keys[44] != 0;        // Space (same as jump)
+            input.lookDelta = {
+                (float)plat->input().mouseDeltaY * 0.002f,
+                (float)plat->input().mouseDeltaX * 0.002f,
+                0
+            };
+
+            // Toggle relative mouse for FPS
+            static bool wasInMenu = true;
+            if (g->state() == Game::Playing && wasInMenu) {
+                plat->setRelativeMouse(true);
+                plat->showMouse(false);
+                wasInMenu = false;
+            }
+            if (g->state() != Game::Playing) wasInMenu = true;
+
+            g->applyInput(input);
+            g->update(dt);
+            g->render(dt);
+        } else {
+            // Menu rendering
+            plat->setRelativeMouse(false);
+            plat->showMouse(true);
+            auto& r = *ren;
+            r.beginFrame({0.1f, 0.1f, 0.2f, 1.0f});
+            r.endFrame();
+        }
+
+        plat->swapBuffers();
+
+        // FPS counter
+        frameCount++;
+        fpsTimer += dt;
+        if (fpsTimer >= 1.0f) {
+            char title[128];
+            snprintf(title, sizeof(title), "T2 Client - %d FPS", frameCount);
+            plat->setTitle(title);
+            frameCount = 0;
+            fpsTimer = 0;
+        }
+    }
+}
+
+void Engine::shutdown() {
+    Console::instance().printf(LogLevel::Info, "Shutting down...");
+
+    g->shutdown();
+    net->shutdown();
+    scr->shutdown();
+    aud->shutdown();
+    ren->shutdown();
+    filesys->shutdown();
+    plat->shutdown();
+
+    delete g; g = nullptr;
+    delete net; net = nullptr;
+    delete scr; scr = nullptr;
+    delete aud; aud = nullptr;
+    delete ren; ren = nullptr;
+    delete filesys; filesys = nullptr;
+    delete plat; plat = nullptr;
+    delete tim; tim = nullptr;
+
+    Console::instance().printf(LogLevel::Info, "Goodbye");
+}
+
+bool Engine::isRunning() const { return running; }

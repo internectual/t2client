@@ -1,0 +1,364 @@
+#include "render/renderer.h"
+#include "render/shader.h"
+#include "core/engine.h"
+#include "core/console.h"
+#include "fs/file_system.h"
+#include "stb_image.h"
+#include <GL/glew.h>
+#include <SDL3/SDL.h>
+#include <vector>
+#include <unordered_map>
+#include <algorithm>
+#include <cstring>
+
+struct Renderer::Impl {
+    SDL_Window* window{};
+    SDL_GLContext glContext{};
+    std::unordered_map<std::string, Texture*> textures;
+    std::vector<Shader*> shaders;
+    bool glewInit = false;
+
+    // Current state
+    MatrixF projection;
+    MatrixF view;
+    MatrixF model;
+};
+
+Renderer::Renderer() : impl(new Impl) {}
+Renderer::~Renderer() { delete impl; }
+
+bool Renderer::init(void* window) {
+    impl->window = (SDL_Window*)window;
+    impl->glContext = SDL_GL_GetCurrentContext();
+
+    if (!impl->glContext) {
+        Console::instance().printf(LogLevel::Error, "No OpenGL context available");
+        return false;
+    }
+
+    glewExperimental = GL_TRUE;
+    GLenum err = glewInit();
+    if (err != GLEW_OK) {
+        Console::instance().printf(LogLevel::Error, "GLEW init failed: %s", glewGetErrorString(err));
+        return false;
+    }
+
+    impl->glewInit = true;
+    initialized = true;
+
+    Console::instance().printf(LogLevel::Info, "Renderer: OpenGL %s, GLEW %s",
+        glGetString(GL_VERSION), glewGetString(GLEW_VERSION));
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glClearColor(0.3f, 0.5f, 0.8f, 1.0f);
+
+    ShaderManager::init();
+    defaultShader = ShaderManager::getDefaultShader();
+    currentShader = defaultShader;
+
+    return true;
+}
+
+void Renderer::shutdown() {
+    ShaderManager::destroy();
+    for (auto& [k, v] : impl->textures) delete v;
+    impl->textures.clear();
+    initialized = false;
+}
+
+void Renderer::beginFrame(const ColorF& clearColor) {
+    stats.drawCalls = 0;
+    stats.triangles = 0;
+    glClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+}
+
+void Renderer::endFrame() {
+    glFlush();
+}
+
+void Renderer::setViewport(int32_t x, int32_t y, int32_t w, int32_t h) {
+    glViewport(x, y, w, h);
+}
+
+void Renderer::setProjection(const MatrixF& proj) {
+    impl->projection = proj;
+    projection = proj;
+    if (currentShader) {
+        currentShader->bind();
+        currentShader->setUniform("uProjection", proj);
+    }
+}
+
+void Renderer::setView(const MatrixF& view) {
+    impl->view = view;
+    this->view = view;
+    if (currentShader) {
+        currentShader->bind();
+        currentShader->setUniform("uView", view);
+    }
+}
+
+void Renderer::setModel(const MatrixF& model) {
+    impl->model = model;
+    if (currentShader) {
+        currentShader->bind();
+        currentShader->setUniform("uModel", model);
+    }
+}
+
+void Renderer::setCamera(const Point3F& pos, const Point3F& target, const Point3F& up) {
+    MatrixF v;
+    v.lookAt(pos, target, up);
+    setView(v);
+
+    auto& cfg = config();
+    MatrixF p;
+    p.perspective(Math::DEG2RAD(cfg.fov), cfg.width / (float)cfg.height, cfg.nearPlane, cfg.farPlane);
+    setProjection(p);
+}
+
+void Renderer::drawMesh(MeshData& mesh, const MatrixF& transform) {
+    if (!mesh.uploaded) return;
+
+    setModel(transform);
+    mesh.render();
+    stats.drawCalls++;
+    stats.triangles += (int32_t)(mesh.indices.size() / 3);
+}
+
+void Renderer::drawLine(const Point3F& a, const Point3F& b, const ColorF& color) {
+    auto* ls = ShaderManager::getLineShader();
+    if (!ls) return;
+    ls->bind();
+    ls->setUniform("uProjection", projection);
+    ls->setUniform("uView", view);
+    ls->setUniform("uColor", Point3F{color.r, color.g, color.b});
+
+    float verts[] = {a.x, a.y, a.z, b.x, b.y, b.z};
+    uint32_t vao, vbo;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, 6 * sizeof(float), verts, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), 0);
+    glEnableVertexAttribArray(0);
+    glDrawArrays(GL_LINES, 0, 2);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+
+    stats.drawCalls++;
+}
+
+void Renderer::drawBox(const Box3F& box, const ColorF& color) {
+    Point3F verts[8] = {
+        {box.min.x, box.min.y, box.min.z}, {box.max.x, box.min.y, box.min.z},
+        {box.max.x, box.max.y, box.min.z}, {box.min.x, box.max.y, box.min.z},
+        {box.min.x, box.min.y, box.max.z}, {box.max.x, box.min.y, box.max.z},
+        {box.max.x, box.max.y, box.max.z}, {box.min.x, box.max.y, box.max.z}
+    };
+    int edges[12][2] = {
+        {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7}
+    };
+    for (auto& e : edges)
+        drawLine(verts[e[0]], verts[e[1]], color);
+}
+
+Texture* Renderer::loadTexture(const char* path) {
+    auto it = impl->textures.find(path);
+    if (it != impl->textures.end()) return it->second;
+
+    auto data = Engine::instance().fs().read(path);
+    if (data.empty()) {
+        Console::instance().printf(LogLevel::Warn, "Texture not found: %s", path);
+        return nullptr;
+    }
+
+    auto* tex = new Texture;
+    tex->load(data.data(), data.size());
+    impl->textures[path] = tex;
+    stats.textures++;
+    return tex;
+}
+
+Shader* Renderer::loadShader(const char* vertPath, const char* fragPath) {
+    auto* s = new Shader;
+    if (!s->loadFromFiles(vertPath, fragPath)) {
+        delete s;
+        return nullptr;
+    }
+    impl->shaders.push_back(s);
+    return s;
+}
+
+void Renderer::addShader(Shader* shader) {
+    impl->shaders.push_back(shader);
+}
+
+void Renderer::addTexture(Texture* tex) {
+    static int counter = 0;
+    char name[64];
+    snprintf(name, sizeof(name), "__tex_%d", counter++);
+    impl->textures[name] = tex;
+}
+
+void Renderer::renderText(const char* text, float x, float y, const ColorF& color, float scale) {
+    if (defaultFont) defaultFont->render(text, x, y, color, scale);
+}
+
+void Renderer::onResize(int32_t w, int32_t h) {
+    cfg.width = w;
+    cfg.height = h;
+    glViewport(0, 0, w, h);
+
+    MatrixF p;
+    p.perspective(Math::DEG2RAD(cfg.fov), w / (float)h, cfg.nearPlane, cfg.farPlane);
+    setProjection(p);
+}
+
+// Mesh
+void MeshData::upload() {
+    if (uploaded) return;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint32_t), indices.data(), GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, pos));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, uv));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, color));
+    glEnableVertexAttribArray(3);
+
+    uploaded = true;
+}
+
+void MeshData::render() {
+    if (!uploaded) return;
+    glBindVertexArray(vao);
+    glDrawElements(GL_TRIANGLES, (GLsizei)indices.size(), GL_UNSIGNED_INT, 0);
+}
+
+void MeshData::destroy() {
+    if (vao) glDeleteVertexArrays(1, &vao);
+    if (vbo) glDeleteBuffers(1, &vbo);
+    if (ebo) glDeleteBuffers(1, &ebo);
+    uploaded = false;
+}
+
+// Texture
+void Texture::load(const uint8_t* data, size_t size) {
+    int w, h, channels;
+    unsigned char* pixels = stbi_load_from_memory(data, (int)size, &w, &h, &channels, 4);
+    if (!pixels) return;
+    loadRaw(pixels, w, h, 4);
+    stbi_image_free(pixels);
+}
+
+void Texture::loadRaw(const uint8_t* pixels, int32_t w, int32_t h, int32_t channels) {
+    if (!id) glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    GLenum fmt = (channels == 4) ? GL_RGBA : GL_RGB;
+    glTexImage2D(GL_TEXTURE_2D, 0, (GLint)fmt, w, h, 0, fmt, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    width = w; height = h;
+    loaded = true;
+}
+
+void Texture::bind(int32_t unit) {
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glBindTexture(GL_TEXTURE_2D, id);
+}
+
+void Texture::destroy() {
+    if (id) glDeleteTextures(1, &id);
+    loaded = false;
+}
+
+// Shader
+bool Shader::load(const char* vertSrc, const char* fragSrc) {
+    auto compile = [](GLenum type, const char* src) -> uint32_t {
+        uint32_t shader = glCreateShader(type);
+        glShaderSource(shader, 1, &src, nullptr);
+        glCompileShader(shader);
+        GLint success;
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+        if (!success) {
+            char log[1024];
+            glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
+            Console::instance().printf(LogLevel::Error, "Shader compile error: %s", log);
+            return 0;
+        }
+        return shader;
+    };
+
+    uint32_t vs = compile(GL_VERTEX_SHADER, vertSrc);
+    uint32_t fs = compile(GL_FRAGMENT_SHADER, fragSrc);
+    if (!vs || !fs) return false;
+
+    id = glCreateProgram();
+    glAttachShader(id, vs);
+    glAttachShader(id, fs);
+    glLinkProgram(id);
+
+    GLint success;
+    glGetProgramiv(id, GL_LINK_STATUS, &success);
+    if (!success) {
+        char log[1024];
+        glGetProgramInfoLog(id, sizeof(log), nullptr, log);
+        Console::instance().printf(LogLevel::Error, "Shader link error: %s", log);
+        return false;
+    }
+
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    loaded = true;
+    return true;
+}
+
+bool Shader::loadFromFiles(const char* vertPath, const char* fragPath) {
+    auto readFile = [](const char* path) -> std::string {
+        return Engine::instance().fs().readText(path);
+    };
+    auto vert = readFile(vertPath);
+    auto frag = readFile(fragPath);
+    if (vert.empty() || frag.empty()) return false;
+    return load(vert.c_str(), frag.c_str());
+}
+
+void Shader::bind() { if (id) glUseProgram(id); }
+
+void Shader::setUniform(const char* name, float v) {
+    glUniform1f(glGetUniformLocation(id, name), v);
+}
+
+void Shader::setUniform(const char* name, const Point3F& v) {
+    glUniform3f(glGetUniformLocation(id, name), v.x, v.y, v.z);
+}
+
+void Shader::setUniform(const char* name, const MatrixF& m) {
+    glUniformMatrix4fv(glGetUniformLocation(id, name), 1, GL_FALSE, m.data());
+}
+
+void Shader::setUniform(const char* name, int32_t v) {
+    glUniform1i(glGetUniformLocation(id, name), v);
+}
+
+void Shader::destroy() { if (id) glDeleteProgram(id); loaded = false; }

@@ -1,0 +1,97 @@
+#include "game/physics.h"
+#include "game/game.h"
+#include "core/engine.h"
+#include <cmath>
+
+Physics::Physics() {}
+Physics::~Physics() {}
+
+void Physics::update(Player* player, float dt, const Game::InputMove& input) {
+    if (!player) return;
+
+    Point3F pos = player->position();
+    Point3F rot = player->rotation();
+    Point3F vel = player->velocity();
+
+    // Apply input acceleration
+    float speed = 10.0f;
+    Point3F moveDir{0,0,0};
+
+    if (input.forward) moveDir.x += std::sin(rot.z) * speed;
+    if (input.backward) moveDir.x -= std::sin(rot.z) * speed;
+    if (input.left) moveDir.z += std::cos(rot.z) * speed;
+    if (input.right) moveDir.z -= std::cos(rot.z) * speed;
+
+    // Apply movement
+    vel.x += (moveDir.x - vel.x) * dt * 10.0f;
+    vel.z += (moveDir.z - vel.z) * dt * 10.0f;
+
+    // Jump
+    float groundHeight = Engine::instance().game().world().getHeight(pos.x, pos.z);
+    bool onGround = pos.y <= groundHeight + 0.1f;
+
+    if (input.jump && onGround) {
+        vel.y = 8.0f;
+        onGround = false;
+    }
+
+    // Jet
+    float energy = player->energy();
+    if (input.jet && energy > 0) {
+        vel.y += 12.0f * dt;
+        energy -= 25.0f * dt;
+        if (energy < 0) energy = 0;
+    } else {
+        energy += 15.0f * dt;
+        if (energy > 100) energy = 100;
+    }
+
+    // Gravity
+    if (!onGround) {
+        vel.y += gravity * dt;
+        vel.x *= airFriction;
+        vel.z *= airFriction;
+    } else {
+        vel.x *= friction;
+        vel.z *= friction;
+    }
+
+    // Update position
+    pos.x += vel.x * dt;
+    pos.y += vel.y * dt;
+    pos.z += vel.z * dt;
+
+    // Ground clamp
+    if (pos.y < groundHeight) {
+        pos.y = groundHeight;
+        vel.y = 0;
+        onGround = true;
+    }
+
+    // Update rotation from look input
+    rot.x += input.lookDelta.x * dt;
+    rot.z += input.lookDelta.y * dt;
+    rot.x = Math::clamp(rot.x, -Math::PI * 0.45f, Math::PI * 0.45f);
+
+    player->setPosition(pos);
+    player->setRotation(rot);
+    // Set velocity via the player (would need a setter)
+}
+
+Physics::RayCastResult Physics::rayCast(const Point3F& origin, const Point3F& dir, float maxDist) {
+    RayCastResult result;
+
+    // Simple ground test
+    float h = Engine::instance().game().world().getHeight(origin.x, origin.z);
+    if (origin.y > h && dir.y < 0) {
+        float t = (origin.y - h) / (-dir.y);
+        if (t >= 0 && t <= maxDist) {
+            result.hit = true;
+            result.point = {origin.x + dir.x * t, h, origin.z + dir.z * t};
+            result.normal = {0, 1, 0};
+            result.distance = t;
+        }
+    }
+
+    return result;
+}

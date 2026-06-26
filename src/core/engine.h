@@ -1,0 +1,55 @@
+#pragma once
+
+#include "core/platform.h"
+#include "core/console.h"
+#include "core/math.h"
+#include "core/timer.h"
+#include "core/string_table.h"
+
+#include "render/renderer.h"
+#include "audio/audio_system.h"
+#include "script/script_engine.h"
+#include "fs/file_system.h"
+#include "net/network.h"
+#include "game/game.h"
+
+class Engine {
+public:
+    Engine();
+    ~Engine();
+
+    bool init(int argc, char* argv[]);
+    void run();
+    void shutdown();
+    bool isRunning() const;
+
+    static Engine& instance();
+
+    Platform& platform() { return *plat; }
+    Console& console() { return *con; }
+    Renderer& renderer() { return *ren; }
+    AudioSystem& audio() { return *aud; }
+    FileSystem& fs() { return *filesys; }
+    ScriptEngine& script() { return *scr; }
+    NetworkManager& network() { return *net; }
+    Game& game() { return *g; }
+    Timer& timer() { return *tim; }
+
+    void quit() { running = false; }
+
+private:
+    struct Impl;
+    Impl* impl;
+
+    Platform* plat{};
+    Console* con{};
+    Renderer* ren{};
+    AudioSystem* aud{};
+    FileSystem* filesys{};
+    ScriptEngine* scr{};
+    NetworkManager* net{};
+    Game* g{};
+    Timer* tim{};
+
+    bool running = false;
+};
