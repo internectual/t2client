@@ -112,6 +112,7 @@ void Renderer::setModel(const MatrixF& model) {
 }
 
 void Renderer::setCamera(const Point3F& pos, const Point3F& target, const Point3F& up) {
+    cameraPos = pos;
     MatrixF v;
     v.lookAt(pos, target, up);
     setView(v);

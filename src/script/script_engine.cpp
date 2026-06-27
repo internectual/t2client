@@ -82,12 +82,17 @@ struct VMContext {
     int strBuilderLen{};
 };
 
+struct ArgFrame {
+    std::vector<VMValue> args;
+};
+
 struct VirtualMachine::Impl {
     ScriptEngine* engine;
     std::vector<DSOFile*> loaded;
     std::stack<VMContext> callStack;
     std::unordered_map<std::string, VMValue> globals;
     std::unordered_map<std::string, NativeFunc> natives;
+    std::vector<ArgFrame> argFrames;
 
     // Current variable/object/field context
     std::string curVar;
@@ -240,8 +245,7 @@ VMValue VirtualMachine::callFunction(const char* name, const std::vector<VMValue
     for (auto* dso : impl->loaded) {
         auto fit = dso->funcMap.find(name);
         if (fit != dso->funcMap.end()) {
-            execute(dso, fit->second->startIp, args);
-            return impl->callStack.empty() ? VMValue(0) : impl->callStack.top().result;
+            return execute(dso, fit->second->startIp, args);
         }
     }
 
@@ -255,7 +259,7 @@ VMValue VirtualMachine::callMethod(const char* objName, const char* method, cons
     return callFunction(fullName.c_str(), args);
 }
 
-void VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vector<VMValue>& args) {
+VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vector<VMValue>& args) {
     VMContext ctx;
     ctx.dso = dso;
     ctx.ip = startIp;
@@ -310,11 +314,12 @@ void VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vector<V
         switch (op) {
             // === Control flow ===
             case (uint32_t)DSOOpcode::OP_RETURN: {
+                VMValue ret;
                 if (!stack.empty()) {
-                    frame->result = stack.top();
+                    ret = stack.top();
                 }
                 impl->callStack.pop();
-                return;
+                return ret;
             }
 
             case (uint32_t)DSOOpcode::OP_JMP: {
@@ -366,12 +371,16 @@ void VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vector<V
 
             // === Stack operations ===
             case (uint32_t)DSOOpcode::OP_PUSH: {
-                // Push current locals/frame
+                // Pop top of expr stack into current arg frame
+                if (!impl->argFrames.empty() && !stack.empty()) {
+                    impl->argFrames.back().args.push_back(stack.pop());
+                }
                 break;
             }
 
             case (uint32_t)DSOOpcode::OP_PUSH_FRAME: {
                 // Start a new argument frame
+                impl->argFrames.push_back(ArgFrame{});
                 break;
             }
 
@@ -648,11 +657,11 @@ void VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vector<V
                     if (nsIdx < dso->functionStrings.size()) ns = &dso->functionStrings[nsIdx];
                     else if (nsIdx < dso->globalStrings.size()) ns = &dso->globalStrings[nsIdx];
 
-                    // Collect arguments from stack (pushed before call)
+                    // Collect arguments from current arg frame
                     std::vector<VMValue> callArgs;
-                    if (callType == 0) {
-                        // Normal call - collect from current frame's arguments
-                        // In TGE, arguments are pushed on the stack
+                    if (!impl->argFrames.empty()) {
+                        callArgs = std::move(impl->argFrames.back().args);
+                        impl->argFrames.pop_back();
                     }
 
                     // Build full function name: ns::name
@@ -670,7 +679,8 @@ void VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vector<V
                         for (auto* ds : impl->loaded) {
                             auto fit = ds->funcMap.find(fullName);
                             if (fit != ds->funcMap.end()) {
-                                execute(ds, fit->second->startIp, callArgs);
+                                VMValue result = execute(ds, fit->second->startIp, callArgs);
+                                stack.push(result);
                                 found = true;
                                 break;
                             }
@@ -678,9 +688,6 @@ void VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vector<V
                         if (!found) {
                             Console::instance().printf(LogLevel::Debug, "VM: calling unknown func %s", fullName.c_str());
                             stack.push(VMValue(0));
-                        } else {
-                            // Get result from completed call
-                            stack.push(VMValue(0)); // placeholder
                         }
                     }
 
@@ -887,6 +894,7 @@ void VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vector<V
     }
 
     impl->callStack.pop();
+    return {};
 }
 
 // === ScriptEngine ===

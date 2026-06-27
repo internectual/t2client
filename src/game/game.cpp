@@ -270,6 +270,7 @@ bool World::load(const char* mapName) {
 
     // Load sky from mission materialList
     std::vector<std::string> skyFaces;
+    std::string emapPath;
     if (!skyMaterialList.empty()) {
         // Try to load the DML file
         std::string dmlPath = "textures/" + skyMaterialList;
@@ -284,17 +285,24 @@ bool World::load(const char* mapName) {
         }
         if (!dmlData.empty()) {
             std::string dmlContent((const char*)dmlData.data(), dmlData.size());
-            // Parse first 6 lines as cubemap face texture names
+            // Parse all lines from DML: first 6 = cubemap faces, 7th = emap, 8-10 = cloud layers
             std::vector<std::string> faceNames;
             size_t pos = 0;
-            while (pos < dmlContent.size() && faceNames.size() < 6) {
+            int lineIdx = 0;
+            while (pos < dmlContent.size()) {
                 while (pos < dmlContent.size() && (dmlContent[pos] == ' ' || dmlContent[pos] == '\t' || dmlContent[pos] == '\r')) pos++;
                 if (pos >= dmlContent.size()) break;
                 size_t end = pos;
                 while (end < dmlContent.size() && dmlContent[end] != '\n') end++;
                 std::string line = dmlContent.substr(pos, end - pos);
                 while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r')) line.pop_back();
-                if (!line.empty()) faceNames.push_back(line);
+                if (!line.empty()) {
+                    if (lineIdx < 6)
+                        faceNames.push_back(line);
+                    else if (lineIdx == 6)
+                        emapPath = line;
+                }
+                lineIdx++;
                 pos = end + 1;
             }
 
@@ -363,6 +371,40 @@ bool World::load(const char* mapName) {
     if (skyFaces.size() >= 6) {
         skyBox.load(skyFaces);
         Console::instance().printf(LogLevel::Info, "  sky loaded from: %s", skyMaterialList.c_str());
+
+        // Load environment map (sphere map) from DML line 7
+        if (!emapPath.empty()) {
+            std::string emapFullPath;
+            std::vector<std::string> exts = {".png", ".jpg", ".bm8"};
+            // Try textures/<path>.<ext> first
+            for (auto& ext : exts) {
+                std::string p = "textures/" + emapPath + ext;
+                Console::instance().printf(LogLevel::Debug, "  trying emap: %s", p.c_str());
+                auto ed = fs.read(p.c_str());
+                if (!ed.empty()) {
+                    emapFullPath = p;
+                    skyBox.emap.load(ed.data(), ed.size());
+                    Console::instance().printf(LogLevel::Info, "  emap loaded: %s (%zu bytes)", p.c_str(), ed.size());
+                    break;
+                }
+            }
+            if (emapFullPath.empty()) {
+                // Try without textures/ prefix
+                for (auto& ext : exts) {
+                    std::string p = emapPath + ext;
+                    Console::instance().printf(LogLevel::Debug, "  trying emap (no prefix): %s", p.c_str());
+                    auto ed = fs.read(p.c_str());
+                    if (!ed.empty()) {
+                        skyBox.emap.load(ed.data(), ed.size());
+                        Console::instance().printf(LogLevel::Info, "  emap loaded: %s (%zu bytes)", p.c_str(), ed.size());
+                        break;
+                    }
+                }
+            }
+            if (!skyBox.emap.loaded) {
+                Console::instance().printf(LogLevel::Debug, "  emap NOT FOUND: %s", emapPath.c_str());
+            }
+        }
     } else {
         Console::instance().printf(LogLevel::Info, "No sky textures found, generating default");
     }
@@ -388,7 +430,16 @@ void World::render(const Point3F& cameraPos) {
     }
 
     // Render world objects
-    ShaderManager::getDefaultShader()->bind();
+    auto* defShader = ShaderManager::getDefaultShader();
+    defShader->bind();
+    defShader->setUniform("uCamPos", cameraPos);
+
+    // Bind environment map from sky (for reflections on shapes)
+    if (skyBox.emap.loaded) {
+        skyBox.emap.bind(2);
+        defShader->setUniform("uEnvMap", (int32_t)2);
+    }
+
     for (auto& obj : worldObjects) {
         if (obj.shape && obj.shape->loaded) {
             MatrixF model;

@@ -633,6 +633,14 @@ void DTSShape::render(int32_t detailLevel) {
 
         if (shader) shader->setUniform("uSelfIlluminated", (int32_t)((flags & MatFlag_SelfIlluminating) ? 1 : 0));
 
+        // Enable env map for materials that don't have NeverEnvMap
+        bool useEnvMap = false;
+        auto& ren = Engine::instance().renderer();
+        if (ren.sky && ren.sky->emap.loaded && !(flags & MatFlag_NeverEnvMap)) {
+            useEnvMap = true;
+        }
+        if (shader) shader->setUniform("uUseEnvMap", (int32_t)(useEnvMap ? 1 : 0));
+
         mesh.render();
     }
 

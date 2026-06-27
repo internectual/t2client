@@ -17,16 +17,20 @@ layout(location = 3) in vec4 aColor;
 uniform mat4 uProjection;
 uniform mat4 uView;
 uniform mat4 uModel;
+uniform vec3 uCamPos = vec3(0);
 
 out vec3 vNormal;
 out vec2 vUV;
 out vec4 vColor;
+out vec3 vWorldPos;
 
 void main() {
-    gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
+    vec4 worldPos = uModel * vec4(aPos, 1.0);
+    gl_Position = uProjection * uView * worldPos;
     vNormal = mat3(uModel) * aNormal;
     vUV = aUV;
     vColor = aColor;
+    vWorldPos = worldPos.xyz;
 }
 )";
 
@@ -35,13 +39,17 @@ static const char* defaultFrag = R"(
 in vec3 vNormal;
 in vec2 vUV;
 in vec4 vColor;
+in vec3 vWorldPos;
 
 uniform sampler2D uTexture;
 uniform sampler2D uLightmap;
+uniform sampler2D uEnvMap;
 uniform bool uUseTexture;
 uniform bool uUseLightmap = false;
+uniform bool uUseEnvMap = false;
 uniform bool uSelfIlluminated = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
+uniform vec3 uCamPos = vec3(0);
 
 out vec4 FragColor;
 
@@ -57,7 +65,16 @@ void main() {
     } else {
         vec3 N = normalize(vNormal);
         float diff = max(dot(N, normalize(uLightDir)), 0.0);
-        FragColor = vec4(col.rgb * (0.3 + 0.7 * diff), col.a);
+        vec3 lit = col.rgb * (0.3 + 0.7 * diff);
+        if (uUseEnvMap) {
+            vec3 V = normalize(uCamPos - vWorldPos);
+            vec3 R = reflect(-V, N);
+            float m = 2.0 * sqrt(R.x*R.x + R.y*R.y + (R.z + 1.0)*(R.z + 1.0));
+            vec2 envUV = vec2(R.x / m + 0.5, R.y / m + 0.5);
+            vec4 env = texture(uEnvMap, envUV);
+            lit = mix(lit, env.rgb, 0.25);
+        }
+        FragColor = vec4(lit, col.a);
     }
 }
 )";

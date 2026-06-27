@@ -125,6 +125,7 @@ struct TerrainBlock {
 struct Sky {
     uint32_t cubemap{};
     uint32_t vao{}, vbo{};
+    Texture emap;
     bool loaded = false;
     void load(const std::vector<std::string>& faces);
     void render(const MatrixF& view, const MatrixF& proj);
@@ -173,6 +174,7 @@ public:
     Shader* currentShader{};
     MatrixF projection;
     MatrixF view;
+    Point3F cameraPos;
 
     // Stats
     struct Stats {
